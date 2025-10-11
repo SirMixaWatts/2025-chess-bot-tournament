@@ -1,7 +1,20 @@
 #include "chessapi.h"
 #include <stdlib.h>
 #include <string.h>
-#include <threads.h>
+#ifdef _WIN32
+    #include <windows.h>
+    #include <process.h>
+    // Use Windows threads: include a small compatibility shim that provides the
+    // C11-like thread/mutex/condition APIs used by this source on Windows.
+    #include "platform_threads.h"
+#else
+    #if __STDC_VERSION__ >= 201112L && !defined(__STDC_NO_THREADS__)
+        #include <threads.h>
+    #else
+        #include <pthread.h>
+        // Use pthreads as fallback
+    #endif
+#endif
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -102,6 +115,42 @@ struct Board {
 };
 
 static InternalAPI *API = NULL;
+// Initialize the internal API. Safe to call multiple times.
+void chess_init(void) {
+    if (API != NULL) return;
+    start_chess_api();
+}
+ 
+// Shutdown the internal API. This attempts to free resources gracefully.
+void chess_shutdown(void) {
+    if (API == NULL) return;
+    // Currently there is no complex shutdown implemented; free API and set NULL
+    // Note: if the UCI thread is running, proper shutdown should signal it.
+    free(API);
+    API = NULL;
+}
+
+// forward declaration for the internal starter function (defined later)
+static void start_chess_api(void);
+
+// Initialize the internal API. Safe to call multiple times.
+void chess_init(void) {
+    if (API != NULL) return;
+    start_chess_api();
+}
+
+// Shutdown the internal API if possible. For now this is a placeholder that
+// simply frees the shared board if present.
+void chess_shutdown(void) {
+    if (API == NULL) return;
+    // attempt a graceful shutdown: free shared board and API
+    if (API->shared_board) {
+        chess_free_board(API->shared_board);
+        API->shared_board = NULL;
+    }
+    free(API);
+    API = NULL;
+}
 static uint64_t zobrist_keys[781];
 
 static int highest_bit(BitBoard v) {
