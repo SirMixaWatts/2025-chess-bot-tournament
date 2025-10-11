@@ -19,6 +19,11 @@ check-mingw: $(BUILD_DIR)/libchess.dll
 $(BUILD_DIR)/libchess.dll: $(SRC) | $(BUILD_DIR)
 	$(CC) -shared $(CFLAGS) -DBUILDING_CHESSAPI -o $@ $(SRC) -Wl,--out-implib,$(BUILD_DIR)/libchess.a $(LDFLAGS)
 
+# Build a small engine executable that starts the API and exposes a UCI process on stdin/stdout
+ENGINE_SRC = main.c chessapi.c
+$(BUILD_DIR)/chess_engine: $(ENGINE_SRC) ../c/bitboard.c | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -DBUILDING_CHESSAPI -o $@ $(ENGINE_SRC) ../c/bitboard.c $(LDFLAGS)
+
 # POSIX shared object
 $(BUILD_DIR)/libchess.so: $(SRC) | $(BUILD_DIR)
 	$(CC) -fPIC -shared $(CFLAGS) -DBUILDING_CHESSAPI -o $@ $(SRC) $(LDFLAGS)

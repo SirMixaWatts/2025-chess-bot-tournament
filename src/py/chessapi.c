@@ -115,21 +115,6 @@ struct Board {
 };
 
 static InternalAPI *API = NULL;
-// Initialize the internal API. Safe to call multiple times.
-void chess_init(void) {
-    if (API != NULL) return;
-    start_chess_api();
-}
- 
-// Shutdown the internal API. This attempts to free resources gracefully.
-void chess_shutdown(void) {
-    if (API == NULL) return;
-    // Currently there is no complex shutdown implemented; free API and set NULL
-    // Note: if the UCI thread is running, proper shutdown should signal it.
-    free(API);
-    API = NULL;
-}
-
 // forward declaration for the internal starter function (defined later)
 static void start_chess_api(void);
 
