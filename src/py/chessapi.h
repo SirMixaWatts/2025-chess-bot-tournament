@@ -4,11 +4,12 @@
 
 #pragma once
 
+#include <stddef.h>
 #include <stdbool.h>
 #include "bitboard.h"
 
-// Export macro for Windows DLLs. Define BUILDING_CHESSAPI when compiling the
-// library itself to export symbols; consumers will import them.
+// Export macro for public API symbols. When building the library define
+// BUILDING_CHESSAPI so symbols are exported on Windows. Consumers will import.
 #if defined(_WIN32) || defined(__CYGWIN__)
     #if defined(BUILDING_CHESSAPI)
         #if defined(__GNUC__)
@@ -24,12 +25,18 @@
         #endif
     #endif
 #else
-    #if __GNUC__ >= 4
+    #if defined(__GNUC__) && __GNUC__ >= 4
         #define CHESSAPI_API __attribute__ ((visibility ("default")))
     #else
         #define CHESSAPI_API
     #endif
 #endif
+
+// Backwards compatibility: some older code used DLLEXPORT
+#ifndef DLLEXPORT
+#define DLLEXPORT CHESSAPI_API
+#endif
+
 
 //! Player color
 typedef enum {
@@ -98,6 +105,16 @@ Caller must free array
 \return A pointer to the start of an array of moves
 */
 CHESSAPI_API Move *chess_get_legal_moves(Board *board, int *len);
+
+//! Returns legal moves
+/*!
+If the array is smaller than available legal moves then writing will stop at array boundary but this won't affect the return value.
+\param board The board to get legal moves on
+\param moves Target array moves are written to
+\param maxlen_moves The size of the passed moves array
+\return The number of legal moves
+*/
+DLLEXPORT int chess_get_legal_moves_inplace(Board *board, Move *moves, size_t maxlen_moves);
 
 //! Returns whether it is white's turn or not
 /*!
@@ -268,6 +285,21 @@ This method will block until the opponent's turn has passed.
 */
 CHESSAPI_API void chess_done();
 
+//! Generates a board from a FEN string
+/*!
+Caller must free the board with free_board
+\sa chess_free_board()
+\param fen A FEN string to generate the board from.
+\return The generated board
+*/
+DLLEXPORT Board* chess_board_from_fen(const char *fen);
+
+//! Get algebraic notation string for chess move
+/*!
+\param buffer The output buffer, should hold at least 7 bytes.
+\param move The move.
+*/
+DLLEXPORT void chess_dump_move(char *buffer, Move move);
 
 ///// TIME MANAGEMENT /////
 

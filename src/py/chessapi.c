@@ -20,8 +20,8 @@
 #include <stdint.h>
 #include <time.h>
 
-#define CHESS_BOT_NAME "My Chess Bot"
-#define BOT_AUTHOR_NAME "Author Name Here"
+#define CHESS_BOT_NAME getenv("CHESS_BOT_NAME") ? getenv("CHESS_BOT_NAME") : "My Chess Bot"
+#define BOT_AUTHOR_NAME getenv("BOT_AUTHOR_NAME") ? getenv("BOT_AUTHOR_NAME") : "Author Name Here"
 
 // ray direction constants (last 8 for knights)
 #define DIR_N 0
@@ -158,7 +158,7 @@ static int highest_bit(BitBoard v) {
     const uint64_t S[] = {1, 2, 4, 8, 16, 32};
     int i;
 
-    register uint64_t r = 0; // result of log2(v) will go here
+    uint64_t r = 0; // result of log2(v) will go here
     for (i = 5; i >= 0; i--) {
         if (v & b[i])
         {
@@ -180,7 +180,7 @@ PieceType chess_get_piece_from_bitboard(Board *board, BitBoard bitboard) {
     if (bitboard & (board->bb_white_knight | board->bb_black_knight)) return KNIGHT;
     if (bitboard & (board->bb_white_bishop | board->bb_black_bishop)) return BISHOP;
     if (bitboard & (board->bb_white_king | board->bb_black_king)) return KING;
-    return 0;  // empty square!
+    return (PieceType)0;  // empty square!
 }
 
 PlayerColor chess_get_color_from_index(Board *board, int index) {
@@ -196,7 +196,7 @@ PlayerColor chess_get_color_from_bitboard(Board *board, BitBoard bitboard) {
         | board->bb_black_rook;
     if ((bitboard & all_pieces_white) > 0) return WHITE;
     if ((bitboard & all_pieces_black) > 0) return BLACK;
-    return -1;  // empty square!
+    return (PlayerColor)-1;  // empty square!
 }
 
 int chess_get_index_from_bitboard(BitBoard bitboard) {
@@ -397,9 +397,9 @@ static void clear_board(Board *board) {
     calc_zobrist(board);
 }
 
-static void set_board_from_fen(Board *board, char *fen) {
+static void set_board_from_fen(Board *board, const char *fen) {
     // if no fen given, use starting pos
-    char *use_fen = (fen != NULL) ? fen : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+    const char *use_fen = (fen != NULL) ? fen : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
     clear_board(board);
     board->can_castle_bk = false;
     board->can_castle_bq = false;
@@ -421,10 +421,10 @@ static void set_board_from_fen(Board *board, char *fen) {
             case 'K': board->bb_white_king |= place_piece; break;
             case 'P': board->bb_white_pawn |= place_piece; break;
             case '/': break;
-            default:
+            default: {
                 char spaces = *use_fen - '0';
                 place_piece <<= (spaces - 1);
-                break;
+            } break;
         }
         if (*use_fen == '/') {
             use_fen++;
@@ -519,6 +519,10 @@ static Board *clone_board(Board * board) {
 // Moves are presumed legal.
 static void make_move(Board *board, Move move) {
     Board *saved_board = clone_board(board); // note: makes a new ref to the board history
+    saved_board->bb_black_moves = board->bb_black_moves; // transfer our caches to the clone
+    saved_board->bb_white_moves = board->bb_white_moves; // transfer our caches to the clone
+    board->bb_black_moves = NULL; // remove caches from current board (move invalidates)
+    board->bb_white_moves = NULL; // remove caches from current board (move invalidates)
     //saved_board->last_board = board->last_board;  // should be unnecessary
     if (board->last_board) free_board(board->last_board); // adjust refcount since we're removing a reference
     board->last_board = saved_board;
@@ -1072,7 +1076,7 @@ static BitBoard get_pins_nwse(Board *board, bool white) {
 // If [exclude_pawn_moves], pawn forward advances are not included (effectively making this only return attacks).
 // Caller must free move array.
 static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attacked, BitBoard exclude, bool exclude_pawn_moves) {
-    BitBoard *dirmoves = malloc(16*sizeof(BitBoard));
+    BitBoard *dirmoves = (BitBoard*)malloc(16*sizeof(BitBoard));
     if ((!all_attacked) && (exclude == 0) && (!exclude_pawn_moves)) {
         if (white && board->bb_white_moves) {
             memcpy(dirmoves, board->bb_white_moves, 16*sizeof(BitBoard));
@@ -1170,10 +1174,10 @@ static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attac
     }
     if ((!all_attacked) && (exclude == 0) && (!exclude_pawn_moves)) {
         if (white) {
-            board->bb_white_moves = malloc(16 * sizeof(BitBoard));
+            board->bb_white_moves =(BitBoard*)malloc(16 * sizeof(BitBoard));
             memcpy(board->bb_white_moves, dirmoves, 16 * sizeof(BitBoard));
         } else {
-            board->bb_black_moves = malloc(16 * sizeof(BitBoard));
+            board->bb_black_moves = (BitBoard*)malloc(16 * sizeof(BitBoard));
             memcpy(board->bb_black_moves, dirmoves, 16 * sizeof(BitBoard));
         }
     }
@@ -1209,21 +1213,23 @@ static int num_attackers(Board *board, BitBoard target, bool defenderWhite) {
 
 // Returns valid positions from which an En Passant move can be performed on [board] by white if [white], otherwise by black
 static BitBoard en_passant_valid(Board *board, bool white) {
+    BitBoard all_horz_white = board->bb_white_queen | board->bb_white_rook;
+    BitBoard all_horz_black = board->bb_black_queen | board->bb_black_rook;
     BitBoard all_pieces_white = board->bb_white_bishop | board->bb_white_king
-        | board->bb_white_knight | board->bb_white_pawn | board->bb_white_queen
-        | board->bb_white_rook;
+        | board->bb_white_knight | board->bb_white_pawn | all_horz_white;
     BitBoard all_pieces_black = board->bb_black_bishop | board->bb_black_king
-        | board->bb_black_knight | board->bb_black_pawn | board->bb_black_queen
-        | board->bb_black_rook;
+        | board->bb_black_knight | board->bb_black_pawn | all_horz_black;
     BitBoard all_pieces = all_pieces_black | all_pieces_white;
+    BitBoard my_pawns = white ? board->bb_white_pawn : board->bb_black_pawn;
     BitBoard king_square = white ? board->bb_white_king : board->bb_black_king;
     BitBoard ept = board->en_passant_target;
-    BitBoard valid = bb_slide_e(ept) | bb_slide_w(ept);
+    BitBoard taken = white ? bb_slide_s(ept) : bb_slide_n(ept);
+    BitBoard valid = (bb_slide_e(taken) | bb_slide_w(taken)) & my_pawns;
     bool one_ept_source = (valid & (valid - 1)) == 0;
     if (!one_ept_source) return valid; // two en-passant available pawns, at least one will remain to block xrays, legal
-    BitBoard empty = ~(all_pieces & ~(ept | valid));
-    BitBoard xray = bb_blocker_e(king_square, empty) | bb_blocker_w(king_square, empty);
-    if (xray & (white ? all_pieces_black : all_pieces_white)) return 0;  // xray on en passant rank, not legal
+    BitBoard empty = ~(all_pieces ^ (ept | taken | valid)); // +new pawn, -taken pawn, -old pawn
+    BitBoard xray = bb_blocker_e(king_square, empty) | bb_blocker_w(king_square, empty); // only possible to reveal horizontal xray
+    if (xray & (white ? all_horz_black : all_horz_white)) return 0;  // xray on en passant rank, not legal
     return valid; // no xray on en passant rank, legal
 }
 
@@ -1266,21 +1272,17 @@ static BitBoard single_check_block_tiles(Board *board, bool defenderWhite) {
     return 0;
 }
 
-// adds [move] to array [moves], automatically adjusting the max array size tracked by [maxlen_moves] as [len_moves] grows
-static Move *add_to_moves(Move *moves, size_t *len_moves, size_t *maxlen_moves, Move move) {
-    moves[*len_moves] = move;
-    (*len_moves)++;
-    //printf("new length of moves is %llu\n", *len_moves);
-    if (*len_moves == *maxlen_moves) {
-        (*maxlen_moves) *= 2;
-        return realloc(moves, *maxlen_moves * sizeof(Move));
+// adds [move] to array [moves], making sure to not write over the boundaries.
+static void add_to_moves(Move *moves, size_t *len_moves, size_t maxlen_moves, Move move) {
+    if (*len_moves < maxlen_moves) {
+        moves[*len_moves] = move;
     }
-    return moves;
+    (*len_moves)++;
 }
 
 // Returns the fully legal moves on [board].
-// Caller responsible for freeing array.
-static Move *get_legal_moves(Board *board, int *len) {
+static int get_legal_moves_inplace(Board *board, Move *moves, size_t maxlen_moves)
+{
     bool white = is_white_turn(board);
     BitBoard my_king = white ? board->bb_white_king : board->bb_black_king;
     BitBoard *pseudo_moves = get_pseudo_legal_moves(board, is_white_turn(board), false, 0, false);
@@ -1334,8 +1336,7 @@ static Move *get_legal_moves(Board *board, int *len) {
     printf("%s\n", bitboard_dump2);*/
     // set up moves array
     size_t len_moves = 0;
-    size_t maxlen_moves = 1;
-    Move *moves = (Move *)malloc(maxlen_moves*sizeof(Move));
+    
     Move add_move;
     memset(&add_move, 0, sizeof(add_move));
     // check every target square, if it is attacked by a direction then find piece
@@ -1372,11 +1373,11 @@ static Move *get_legal_moves(Board *board, int *len) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
@@ -1393,53 +1394,58 @@ static Move *get_legal_moves(Board *board, int *len) {
             move_valid &= (moving_king || !double_check);  // only king moves allowed in double check
             move_valid &= ((all_opp_attacked & piecepos) == 0 || !moving_king);  // if moving king, not to attacked square
             move_valid &= (((check_attacks & ((cap_pos & ~pins_not_ns) | piecepos)) > 0 || moving_king) || !check); // single check allows king move, taking checking piece, blocking
-            move_valid &= ((!en_passant) || en_passant_valid(board, white));
+            move_valid &= ((!en_passant) || (add_move.from & en_passant_valid(board, white)));
+            //if (en_passant && !move_valid) printf("en passant move found, but invalid!\n");
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0 || en_passant;
                 if (((piecepos & 0xff000000000000ff) > 0) && moving_pawn) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
         if (pseudo_moves[DIR_NW] & piecepos) {
             add_move.from = bb_blocker_se(piecepos, ~my_pieces);
-            //char movestr[8];
-            //dump_move(movestr, add_move);
-            //printf("testing move: %s\n", movestr);
             bool moving_king = (add_move.from & my_king) > 0;
             bool moving_pawn = (my_pawns & add_move.from) > 0;
             bool en_passant = moving_pawn && ((board->en_passant_target & piecepos) > 0);
+            /*if (en_passant) {
+                char movestr[8];
+                dump_move(movestr, add_move);
+                printf("testing move: %s\n", movestr);
+            }*/
             BitBoard cap_pos = en_passant ? bb_slide_s(piecepos) : piecepos;
             bool move_valid = (add_move.from & pins_ns) == 0 || ((bb_flood_n(add_move.from, empty, true) | bb_flood_s(add_move.from, empty, true)) & piecepos) > 0;  // not moving pinned piece
             move_valid &= (add_move.from & pins_ew) == 0 || ((bb_flood_e(add_move.from, empty, true) | bb_flood_w(add_move.from, empty, true)) & piecepos) > 0;  // not moving pinned piece
             move_valid &= (add_move.from & pins_nesw) == 0 || ((bb_flood_ne(add_move.from, empty, true) | bb_flood_sw(add_move.from, empty, true)) & piecepos) > 0;  // not moving pinned piece
             move_valid &= (add_move.from & pins_nwse) == 0 || ((bb_flood_nw(add_move.from, empty, true) | bb_flood_se(add_move.from, empty, true)) & piecepos) > 0;  // not moving pinned piece
-            //printf("valid after pin check: %s\n", move_valid ? "true" : "false");
+            //if (en_passant) printf("valid after pin check: %s\n", move_valid ? "true" : "false");
             move_valid &= (moving_king || !double_check);  // only king moves allowed in double check
-            //printf("valid after double check check: %s\n", move_valid ? "true" : "false");
+            //if (en_passant) printf("valid after double check check: %s\n", move_valid ? "true" : "false");
             move_valid &= ((all_opp_attacked & piecepos) == 0 || !moving_king);  // if moving king, not to attacked square
-            //printf("valid after king move attack squares check: %s\n", move_valid ? "true" : "false");
+            //if (en_passant) printf("valid after king move attack squares check: %s\n", move_valid ? "true" : "false");
             move_valid &= (((check_attacks & ((cap_pos & ~pins_not_ns) | piecepos)) > 0 || moving_king) || !check); // single check allows king move, taking checking piece, blocking
-            //printf("valid after single check valid move check: %s\n", move_valid ? "true" : "false");
-            move_valid &= ((!en_passant) || en_passant_valid(board, white));
+            //if (en_passant) printf("valid after single check valid move check: %s\n", move_valid ? "true" : "false");
+            move_valid &= ((!en_passant) || (add_move.from & en_passant_valid(board, white)));
+            //if (en_passant) printf("valid after en passant move check: %s\n", move_valid ? "true" : "false");
+            //if (en_passant && !move_valid) printf("en passant move found, but invalid!\n");
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0 || en_passant;
                 if (((piecepos & 0xff000000000000ff) > 0) && moving_pawn) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
@@ -1467,11 +1473,11 @@ static Move *get_legal_moves(Board *board, int *len) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
@@ -1488,18 +1494,19 @@ static Move *get_legal_moves(Board *board, int *len) {
             move_valid &= (moving_king || !double_check);  // only king moves allowed in double check
             move_valid &= ((all_opp_attacked & piecepos) == 0 || !moving_king);  // if moving king, not to attacked square
             move_valid &= (((check_attacks & ((cap_pos & ~pins_not_ns) | piecepos)) > 0 || moving_king) || !check); // single check allows king move, taking checking piece, blocking
-            move_valid &= ((!en_passant) || en_passant_valid(board, white));
+            move_valid &= ((!en_passant) || (add_move.from & en_passant_valid(board, white)));
+            //if (en_passant && !move_valid) printf("en passant move found, but invalid!\n");
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0 || en_passant;
                 if (((piecepos & 0xff000000000000ff) > 0) && moving_pawn) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
@@ -1516,18 +1523,19 @@ static Move *get_legal_moves(Board *board, int *len) {
             move_valid &= (moving_king || !double_check);  // only king moves allowed in double check
             move_valid &= ((all_opp_attacked & piecepos) == 0 || !moving_king);  // if moving king, not to attacked square
             move_valid &= (((check_attacks & ((cap_pos & ~pins_not_ns) | piecepos)) > 0 || moving_king) || !check); // single check allows king move, taking checking piece, blocking
-            move_valid &= ((!en_passant) || en_passant_valid(board, white));
+            move_valid &= ((!en_passant) || (add_move.from & en_passant_valid(board, white)));
+            //if (en_passant && !move_valid) printf("en passant move found, but invalid!\n");
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0 || en_passant;
                 if (((piecepos & 0xff000000000000ff) > 0) && moving_pawn) {
                     // pawn promotion
                     for (char promotion = BISHOP; promotion <= QUEEN; promotion++) {
                         add_move.promotion = promotion;
-                        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                     }
                 } else {
                     add_move.promotion = 0;
-                    moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                    add_to_moves(moves, &len_moves, maxlen_moves, add_move);
                 }
             }
         }
@@ -1552,7 +1560,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             //printf("valid after single check valid move check: %s\n", move_valid ? "true" : "false");
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_W] & piecepos) {
@@ -1568,7 +1576,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             move_valid &= (((check_attacks & piecepos) > 0 || moving_king) || !check); // single check allows king move, taking checking piece, blocking
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         // NOTE: a knight can never perform a vertical or diagonal move
@@ -1585,7 +1593,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_NEE] & piecepos) {
@@ -1599,7 +1607,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_NNW] & piecepos) {
@@ -1613,7 +1621,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_NWW] & piecepos) {
@@ -1627,7 +1635,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_SSE] & piecepos) {
@@ -1641,7 +1649,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_SEE] & piecepos) {
@@ -1655,7 +1663,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_SSW] & piecepos) {
@@ -1669,7 +1677,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         if (pseudo_moves[DIR_SWW] & piecepos) {
@@ -1683,7 +1691,7 @@ static Move *get_legal_moves(Board *board, int *len) {
             if (move_valid) {
                 add_move.capture = (piecepos & opp_pieces) > 0;
                 add_move.promotion = 0;
-                moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+                add_to_moves(moves, &len_moves, maxlen_moves, add_move);
             }
         }
         piecepos <<= 1;
@@ -1713,16 +1721,16 @@ static Move *get_legal_moves(Board *board, int *len) {
         add_move.promotion = 0;
         add_move.from = board->bb_white_king;
         add_move.to = bb_slide_e(bb_slide_e(board->bb_white_king));
-        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
     }
-    if (white && board->can_castle_wq && ((all_opp_attacked & 0x000000000000001e) == 0) && ((all_pieces & 0x000000000000000e) == 0)) {
+    if (white && board->can_castle_wq && ((all_opp_attacked & 0x000000000000001c) == 0) && ((all_pieces & 0x000000000000000e) == 0)) {
         // white queenside
         add_move.capture = false;
         add_move.castle = true;
         add_move.promotion = 0;
         add_move.from = board->bb_white_king;
         add_move.to = bb_slide_w(bb_slide_w(board->bb_white_king));
-        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
     }
     if ((!white) && board->can_castle_bk && ((all_opp_attacked & 0x7000000000000000) == 0) && ((all_pieces & 0x6000000000000000) == 0)) {
         // black kingside
@@ -1731,22 +1739,41 @@ static Move *get_legal_moves(Board *board, int *len) {
         add_move.promotion = 0;
         add_move.from = board->bb_black_king;
         add_move.to = bb_slide_e(bb_slide_e(board->bb_black_king));
-        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
     }
-    if ((!white) && board->can_castle_bq && ((all_opp_attacked & 0x1e00000000000000) == 0) && ((all_pieces & 0x0e00000000000000) == 0)) {
+    if ((!white) && board->can_castle_bq && ((all_opp_attacked & 0x1c00000000000000) == 0) && ((all_pieces & 0x0e00000000000000) == 0)) {
         // black queenside
         add_move.capture = false;
         add_move.castle = true;
         add_move.promotion = 0;
         add_move.from = board->bb_black_king;
         add_move.to = bb_slide_w(bb_slide_w(board->bb_black_king));
-        moves = add_to_moves(moves, &len_moves, &maxlen_moves, add_move);
+        add_to_moves(moves, &len_moves, maxlen_moves, add_move);
     }
-    // shrink array to fit
-    moves = realloc(moves, len_moves * sizeof(Move));
-    *len = len_moves;
+
     free(pseudo_moves);
     free(opp_pseudo_moves);
+
+    return (int)len_moves;
+}
+
+// Returns the fully legal moves on [board].
+// Caller responsible for freeing array.
+static Move *get_legal_moves(Board *board, int *len) {
+    // This is very likely enough to hold all moves
+    const int CONSERVATIVE_SIZE = 256;
+    
+    Move *moves = (Move*)malloc(CONSERVATIVE_SIZE * sizeof(Move));
+    *len = get_legal_moves_inplace(board, moves, CONSERVATIVE_SIZE);
+
+    moves = (Move*)realloc(moves, *len * sizeof(Move));
+
+    if (*len > CONSERVATIVE_SIZE)
+    {
+        // Very unlikely fallback
+        *len = get_legal_moves_inplace(board, moves, *len);
+    }
+
     return moves;
 }
 
@@ -1778,8 +1805,8 @@ static bool is_threefold_draw(Board *board) {
     // i hate everything
     int cur_size = 0;
     int max_size = 1;
-    Board **boards = malloc(sizeof(Board *));
-    int *counts = malloc(sizeof(int));
+    Board **boards = (Board**)malloc(sizeof(Board *));
+    int *counts = (int*)malloc(sizeof(int));
     Board *cur_board = board;
     bool hit, found = false;
     while (cur_board) {
@@ -1798,23 +1825,23 @@ static bool is_threefold_draw(Board *board) {
         if (!hit) {
             if (cur_size == max_size) {
                 max_size *= 2;
-                boards = realloc(boards, max_size*sizeof(Board *));
-                counts = realloc(counts, max_size*sizeof(int));
+                boards = (Board**)realloc(boards, max_size*sizeof(Board *));
+                counts = (int*)realloc(counts, max_size*sizeof(int));
             }
             boards[cur_size] = cur_board;
-            counts[cur_size] = 0;
+            counts[cur_size] = 1;
             cur_size++;
         }
         cur_board = cur_board->last_board;
     }
     free(boards);
     free(counts);
-    if (!hit) return false;
+    if (!found) return false;
     return true;
 }
 
 // Returns GAME_NORMAL, GAME_STALEMATE or GAME_CHECKMATE based on the state on [board]
-static int get_board_end_state(Board *board) {
+static GameState get_board_end_state(Board *board) {
     if (board->halfmoves >= 50) return GAME_STALEMATE;
     if (is_threefold_draw(board)) return GAME_STALEMATE;
     int num_legal_moves;
@@ -1835,8 +1862,10 @@ Board *chess_clone_board(Board *board) {
 }
 
 Move *chess_get_legal_moves(Board *board, int *len) {
-    if (API == NULL) start_chess_api();
     return get_legal_moves(board, len);
+}
+int chess_get_legal_moves_inplace(Board *board, Move *moves, size_t maxlen_moves) {
+    return get_legal_moves_inplace(board, moves, maxlen_moves);
 }
 
 bool chess_is_white_turn(Board *board) {
@@ -1871,7 +1900,6 @@ void chess_undo_move(Board *board) {
 }
 
 void chess_free_board(Board *board) {
-    if (API == NULL) start_chess_api();
     free_board(board);
 }
 
@@ -1907,6 +1935,18 @@ void chess_push(Move move)
 void chess_done() {
     if (API == NULL) start_chess_api();
     interface_done();
+}
+
+Board* chess_board_from_fen(const char *fen) {
+    Board *board = (Board*)malloc(sizeof(Board));
+    memset(board, 0, sizeof(Board));
+    set_board_from_fen(board, fen);
+    board->refcount = 1;
+    return board;
+}
+
+void chess_dump_move(char *buffer, Move move) {
+    dump_move(buffer, move);
 }
 
 BitBoard chess_get_bitboard(Board *board, PlayerColor color, PieceType piece_type) {
