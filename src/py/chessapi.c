@@ -761,6 +761,9 @@ static int uci_process(void *arg) {
         scanf("%[\r\n]", line);
         memset(&line, 0, 4096);
         if (scanf("%[^\r\n]", line) < 0) {
+            // stdin closed or EOF; terminate UCI loop and exit process so
+            // callers that pipe input don't hang indefinitely.
+            running = false;
             break;
         }
         line[4095] = 0;
@@ -852,8 +855,11 @@ static int uci_process(void *arg) {
             token = strtok(NULL, " ");
         }
     }
+    // Ensure process exits when UCI loop ends.
+    fflush(stdout);
+    exit(0);
     //pthread_exit(NULL);
-    return 0;
+    return 0; // unreachable
 }
 
 // Start the UCI listener.

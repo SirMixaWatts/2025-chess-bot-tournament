@@ -1,21 +1,30 @@
 #include "chessapi.h"
 #include <stdio.h>
 #include <stdlib.h>
+// Cross-platform sleep
+#if defined(_WIN32)
+# include <windows.h>
+# define SLEEP_MS(ms) Sleep(ms)
+#else
+# include <unistd.h>
+# define SLEEP_MS(ms) usleep((ms) * 1000)
+#endif
 
 int main(int argc, char **argv) {
     // Start the chess API which launches the UCI listener in a separate thread
     chess_init();
 
-    // The UCI listener reads from stdin using scanf in its own thread. The main
-    // thread should simply wait until stdin is closed or the GUI sends "quit",
-    // which causes the UCI thread to call exit(0). We'll block on reading from
-    // stdin to keep the process alive.
-    int c;
-    while ((c = getchar()) != EOF) {
-        ; // consume input in main thread; uci thread is handling commands
+    // Do not consume stdin here; the UCI listener runs in its own thread and
+    // must receive the GUI's commands. Keep the main thread alive with a
+    // simple sleep loop. Quit will usually be handled by the UCI thread which
+    // calls exit(0), but if stdin closes we'll shutdown gracefully.
+    while (1) {
+        SLEEP_MS(1000);
+        // If you'd like a graceful shutdown hook later, add signal handling
+        // and call chess_shutdown() here.
     }
 
-    // If stdin closed, perform shutdown and exit gracefully
+    // unreachable in current design, kept for completeness
     chess_shutdown();
     return 0;
 }
