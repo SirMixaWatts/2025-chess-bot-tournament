@@ -72,6 +72,7 @@ void semaphore_wait(Semaphore *sem) {
 typedef struct {
     // pthread_t uci_thread;
     thrd_t uci_thread;
+    thrd_t think_thread;
     Board *shared_board;
     uint64_t wtime;
     uint64_t btime;
@@ -117,6 +118,12 @@ struct Board {
 static InternalAPI *API = NULL;
 // forward declaration for the internal starter function (defined later)
 static void start_chess_api(void);
+// forward declarations for functions used across the file
+static Board *interface_get_board();
+static Move *get_legal_moves(Board *board, int *len);
+static void interface_push(Move move);
+static void interface_done();
+static void uci_finished_searching();
 
 // Initialize the internal API. Safe to call multiple times.
 void chess_init(void) {
@@ -825,7 +832,7 @@ static int uci_process(void *arg) {
                 //pthread_mutex_unlock(&API->mutex);
                 mtx_unlock(&API->mutex);
             } else if (!strcmp(token, "go")) {
-                //pthread_mutex_lock(&API->mutex);
+                // collect timing info
                 mtx_lock(&API->mutex);
                 token = strtok(NULL, " ");
                 while (token != NULL) {
@@ -841,10 +848,33 @@ static int uci_process(void *arg) {
                     }
                     token = strtok(NULL, " ");
                 }
-                semaphore_post(&API->intermission_mutex);
                 API->turn_started_time = clock();
-                //pthread_mutex_unlock(&API->mutex);
+                // clone board snapshot for thinking
+                Board *snapshot = NULL;
+                if (API->shared_board != NULL) snapshot = clone_board(API->shared_board);
                 mtx_unlock(&API->mutex);
+
+                // very simple synchronous 'think': pick a random legal move and announce it
+                if (snapshot != NULL) {
+                    int num_moves = 0;
+                    Move *moves = get_legal_moves(snapshot, &num_moves);
+                    Move chosen;
+                    memset(&chosen, 0, sizeof(chosen));
+                    if (num_moves > 0 && moves != NULL) {
+                        chosen = moves[rand() % num_moves];
+                    }
+                    if (moves) free(moves);
+                    free_board(snapshot);
+
+                    // report progress and bestmove
+                    interface_push(chosen);
+                    uci_finished_searching();
+                } else {
+                    // no board, emit a null bestmove
+                    Move nullm; memset(&nullm, 0, sizeof(nullm));
+                    interface_push(nullm);
+                    uci_finished_searching();
+                }
             } else if (!strcmp(token, "stop")) {
                 // does nothing for now
             } else if (!strcmp(token, "quit")) {
@@ -866,6 +896,45 @@ static int uci_process(void *arg) {
 static void uci_start(thrd_t *thread_id) {
     //pthread_create(thread_id, NULL, &uci_process, NULL);
     thrd_create(thread_id, &uci_process, NULL);
+}
+
+
+
+// Simple thinking loop: wait for a 'go' (semaphore), pick a legal move and
+// report it via the interface. This is intentionally simple (random move
+// selection) so the engine will actually play moves for self-play / testing.
+static int thinking_process(void *arg) {
+    (void)arg;
+    while (1) {
+        // wait for 'go' from UCI
+        semaphore_wait(&API->intermission_mutex);
+
+        // grab a snapshot of the current board
+        Board *board = interface_get_board();
+        if (board == NULL) {
+            // nothing to do, wait for next go
+            continue;
+        }
+
+        int num_moves = 0;
+        Move *moves = get_legal_moves(board, &num_moves);
+        Move chosen;
+        memset(&chosen, 0, sizeof(chosen));
+        if (num_moves > 0 && moves != NULL) {
+            // pick a random legal move
+            int idx = rand() % num_moves;
+            chosen = moves[idx];
+        }
+
+    // announce our current search progress (single move) and finish
+    interface_push(chosen);
+    // directly emit bestmove (avoid blocking inside interface_done)
+    uci_finished_searching();
+
+        if (moves) free(moves);
+        if (board) free_board(board);
+    }
+    return 0;
 }
 
 // gets API->latest_pushed_move and formats in standard game notation, storing result in buffer
@@ -1786,8 +1855,8 @@ static void start_chess_api() {
     }
     // start the uci server in its own thread
     uci_start(&API->uci_thread);
-    // block until uci endpoint says go
-    semaphore_wait(&API->intermission_mutex);
+    // start a background thinking thread that will respond to 'go'
+    thrd_create(&API->think_thread, &thinking_process, NULL);
 }
 
 // Returns true if a threefold repetition has occurred on [board]
