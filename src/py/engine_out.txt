@@ -1,4 +1,0 @@
-id name My Chess Bot
-id author Author Name Here
-uciok
-readyok

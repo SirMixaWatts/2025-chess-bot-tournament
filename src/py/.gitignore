@@ -1,1 +1,6 @@
 __pycache__
+bin/
+libchess.*
+*.o
+*.exe
+engine_out.txt

@@ -124,6 +124,7 @@ static Move *get_legal_moves(Board *board, int *len);
 static void interface_push(Move move);
 static void interface_done();
 static void uci_finished_searching();
+static bool in_check(Board *board, bool white);
 
 // Initialize the internal API. Safe to call multiple times.
 void chess_init(void) {
@@ -861,7 +862,50 @@ static int uci_process(void *arg) {
                     Move chosen;
                     memset(&chosen, 0, sizeof(chosen));
                     if (num_moves > 0 && moves != NULL) {
-                        chosen = moves[rand() % num_moves];
+                        // choose an 'annoying' move: prefer checks, otherwise pawn pushes (non-capture), then pawn captures, then any non-capture, then fallback
+                        bool found = false;
+                        // 1) checking moves
+                        for (int i = 0; i < num_moves; i++) {
+                            Move m = moves[i];
+                            make_move(snapshot, m);
+                            bool inChk = in_check(snapshot, snapshot->whiteToMove);
+                            undo_move(snapshot);
+                            if (inChk) {
+                                chosen = m; found = true; break;
+                            }
+                        }
+                        if (!found) {
+                            // 2) pawn pushes non-capture
+                            for (int i = 0; i < num_moves; i++) {
+                                Move m = moves[i];
+                                if (!m.capture) {
+                                    // check if move is pawn move
+                                    BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                                    if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                                }
+                            }
+                        }
+                        if (!found) {
+                            // 3) pawn captures
+                            for (int i = 0; i < num_moves; i++) {
+                                Move m = moves[i];
+                                if (m.capture) {
+                                    BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                                    if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                                }
+                            }
+                        }
+                        if (!found) {
+                            // 4) any non-capture
+                            for (int i = 0; i < num_moves; i++) {
+                                Move m = moves[i];
+                                if (!m.capture) { chosen = m; found = true; break; }
+                            }
+                        }
+                        if (!found) {
+                            // fallback random
+                            chosen = moves[rand() % num_moves];
+                        }
                     }
                     if (moves) free(moves);
                     free_board(snapshot);
@@ -944,15 +988,26 @@ static void dump_api_move(char *buffer) {
 }
 
 static void uci_info() {
+    // Print richer UCI info fields. Many clients expect depth/nodes/time/nps/pv
     char move[8];
     dump_api_move(move);
-    printf("info currmove %s\n", move);
+    // compute some simple stats (time since turn start)
+    uint64_t elapsed_ms = (clock() - API->turn_started_time) / (CLOCKS_PER_SEC / 1000);
+    // nodes and depth are approximations here since we are not running a full search yet
+    unsigned long long nodes = 0;
+    int depth = 1;
+    unsigned long long nps = 0;
+    // If we extend this to a real search, update these values there
+    printf("info depth %d nodes %llu time %llu nps %llu currmove %s\n", depth, nodes, elapsed_ms, nps, move);
     fflush(stdout);
 }
 
 static void uci_finished_searching() {
     char move[8];
     dump_api_move(move);
+    // final output should include bestmove; include a basic pv for clarity
+    // PV: just the chosen move for now
+    printf("info pv %s\n", move);
     printf("bestmove %s\n", move);
     fflush(stdout);
 }
