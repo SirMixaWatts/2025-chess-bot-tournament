@@ -121,6 +121,7 @@ static void start_chess_api(void);
 // forward declarations for functions used across the file
 static Board *interface_get_board();
 static Move *get_legal_moves(Board *board, int *len);
+static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attacked, BitBoard exclude, bool exclude_pawn_moves);
 static void interface_push(Move move);
 static void interface_done();
 static void uci_finished_searching();
@@ -875,13 +876,29 @@ static int uci_process(void *arg) {
                             }
                         }
                         if (!found) {
-                            // 2) pawn pushes non-capture
-                            for (int i = 0; i < num_moves; i++) {
-                                Move m = moves[i];
-                                if (!m.capture) {
-                                    // check if move is pawn move
-                                    BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
-                                    if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                            // If any of our more valuable pieces (non-pawns) are currently
+                            // attacked by the opponent, avoid pushing pawns — prefer
+                            // moves that address the threat. Compute opponent attack map.
+                            BitBoard opp_attacks = 0;
+                            BitBoard *opp_moves = get_pseudo_legal_moves(snapshot, !snapshot->whiteToMove, true, 0, true);
+                            if (opp_moves) {
+                                for (int d = 0; d < 16; d++) opp_attacks |= opp_moves[d];
+                                free(opp_moves);
+                            }
+                            BitBoard our_non_pawns = snapshot->whiteToMove
+                                ? (snapshot->bb_white_rook | snapshot->bb_white_knight | snapshot->bb_white_bishop | snapshot->bb_white_queen | snapshot->bb_white_king)
+                                : (snapshot->bb_black_rook | snapshot->bb_black_knight | snapshot->bb_black_bishop | snapshot->bb_black_queen | snapshot->bb_black_king);
+                            bool important_in_danger = (opp_attacks & our_non_pawns) != 0;
+
+                            // 2) pawn pushes non-capture (skip if important piece in danger)
+                            if (!important_in_danger) {
+                                for (int i = 0; i < num_moves; i++) {
+                                    Move m = moves[i];
+                                    if (!m.capture) {
+                                        // check if move is pawn move
+                                        BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                                        if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                                    }
                                 }
                             }
                         }
