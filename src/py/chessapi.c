@@ -116,16 +116,206 @@ struct Board {
 };
 
 static InternalAPI *API = NULL;
+// Engine personalities
+typedef enum {
+    PERSONALITY_ANNOYING = 0,
+    PERSONALITY_CAUTIOUS = 1,
+    PERSONALITY_RANDOM = 2,
+    PERSONALITY_SMART = 3,
+    PERSONALITY_CONFUSING = 4
+} EnginePersonality;
+
+static EnginePersonality engine_personality = PERSONALITY_ANNOYING;
+static bool auto_personality = true; // if true, engine will auto-switch based on material
+
+// Material weights: pawn=1, knight/bishop=3, rook=5, queen=9
+static int evaluate_material(Board *board) {
+    int w = 0, b = 0;
+    // pawns
+    w += __builtin_popcountll(board->bb_white_pawn) * 1;
+    b += __builtin_popcountll(board->bb_black_pawn) * 1;
+    // knights
+    w += __builtin_popcountll(board->bb_white_knight) * 3;
+    b += __builtin_popcountll(board->bb_black_knight) * 3;
+    // bishops
+    w += __builtin_popcountll(board->bb_white_bishop) * 3;
+    b += __builtin_popcountll(board->bb_black_bishop) * 3;
+    // rooks
+    w += __builtin_popcountll(board->bb_white_rook) * 5;
+    b += __builtin_popcountll(board->bb_black_rook) * 5;
+    // queens
+    w += __builtin_popcountll(board->bb_white_queen) * 9;
+    b += __builtin_popcountll(board->bb_black_queen) * 9;
+    return w - b; // positive means white ahead, negative means black ahead
+}
+
+
+// forward declare helper used below
+static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attacked, BitBoard exclude, bool exclude_pawn_moves);
+
+// Update engine_personality based on material difference from the perspective of the side to move.
+static void update_personality_based_on_material(Board *board) {
+    if (!auto_personality || board == NULL) return;
+    // First: if any of our high-value pieces (rook or queen) are attackable by the opponent,
+    // switch to cautious immediately.
+    BitBoard *opp_moves = get_pseudo_legal_moves(board, !board->whiteToMove, true, 0, true);
+    BitBoard opp_attacks = 0;
+    if (opp_moves) {
+        for (int d = 0; d < 16; d++) opp_attacks |= opp_moves[d];
+        free(opp_moves);
+    }
+    BitBoard our_high = board->whiteToMove
+        ? (board->bb_white_rook | board->bb_white_queen | board->bb_white_bishop | board->bb_white_knight)
+        : (board->bb_black_rook | board->bb_black_queen | board->bb_black_bishop | board->bb_black_knight);
+    if ((opp_attacks & our_high) != 0) {
+        engine_personality = PERSONALITY_CAUTIOUS;
+        return;
+    }
+
+    int mat = evaluate_material(board);
+    // convert to side-to-move perspective (positive if side-to-move advantage)
+    int perspective = board->whiteToMove ? mat : -mat;
+    // thresholds: down by >=3 pawns -> Smart, down by 1-2 pawns -> Cautious, otherwise Annoying
+    if (perspective <= -3) {
+        engine_personality = PERSONALITY_SMART;
+    } else if (perspective <= -1) {
+        engine_personality = PERSONALITY_CAUTIOUS;
+    } else {
+        engine_personality = PERSONALITY_ANNOYING;
+    }
+}
 // forward declaration for the internal starter function (defined later)
 static void start_chess_api(void);
 // forward declarations for functions used across the file
 static Board *interface_get_board();
 static Move *get_legal_moves(Board *board, int *len);
 static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attacked, BitBoard exclude, bool exclude_pawn_moves);
+static BitBoard *get_pseudo_legal_moves(Board *board, bool white, bool all_attacked, BitBoard exclude, bool exclude_pawn_moves);
+static void make_move(Board *board, Move move);
+static void undo_move(Board *board);
 static void interface_push(Move move);
 static void interface_done();
 static void uci_finished_searching();
 static bool in_check(Board *board, bool white);
+
+// Picks a move according to the current personality. Caller must free board/moves as usual.
+static Move choose_move(Board *snapshot) {
+    Move chosen; memset(&chosen, 0, sizeof(chosen));
+    if (snapshot == NULL) return chosen;
+
+    int num_moves = 0;
+    Move *moves = get_legal_moves(snapshot, &num_moves);
+    if (num_moves <= 0 || moves == NULL) {
+        if (moves) free(moves);
+        return chosen;
+    }
+
+    switch (engine_personality) {
+        case PERSONALITY_RANDOM: {
+            chosen = moves[rand() % num_moves];
+            break;
+        }
+        case PERSONALITY_CAUTIOUS: {
+            // prefer moves that address attacks on non-pawn pieces (similar to earlier)
+            BitBoard *opp_moves = get_pseudo_legal_moves(snapshot, !snapshot->whiteToMove, true, 0, true);
+            BitBoard opp_attacks = 0; for (int d=0; d<16; d++) opp_attacks |= opp_moves[d];
+            free(opp_moves);
+            BitBoard our_non_pawns = snapshot->whiteToMove
+                ? (snapshot->bb_white_rook | snapshot->bb_white_knight | snapshot->bb_white_bishop | snapshot->bb_white_queen | snapshot->bb_white_king)
+                : (snapshot->bb_black_rook | snapshot->bb_black_knight | snapshot->bb_black_bishop | snapshot->bb_black_queen | snapshot->bb_black_king);
+            bool important_in_danger = (opp_attacks & our_non_pawns) != 0;
+            if (important_in_danger) {
+                // pick first move which moves an attacked piece or captures the attacker
+                for (int i=0;i<num_moves;i++) {
+                    Move m = moves[i];
+                    // move the attacked piece?
+                    if ((m.from & our_non_pawns) != 0) { chosen = m; break; }
+                }
+                if (chosen.from == 0) chosen = moves[rand() % num_moves];
+            } else {
+                // otherwise prefer non-capture pawn pushes less aggressively
+                for (int i=0;i<num_moves;i++) {
+                    Move m = moves[i];
+                    if (m.capture) { chosen = m; break; }
+                }
+                if (chosen.from == 0) chosen = moves[rand() % num_moves];
+            }
+            break;
+        }
+        case PERSONALITY_SMART: {
+            // trivial 'smart': prefer captures of higher piece value, else best material gain (depth-1)
+            int best_idx = -1; int best_value = -10000;
+            for (int i=0;i<num_moves;i++) {
+                Move m = moves[i];
+                if (!m.capture) continue;
+                // crude value: assume captured piece type by checking destination bitboard
+                // simulate move quickly
+                make_move(snapshot, m);
+                BitBoard dest = m.to;
+                PieceType pt = chess_get_piece_from_bitboard(snapshot, dest);
+                int val = (pt==QUEEN?9:pt==ROOK?5:pt==BISHOP||pt==KNIGHT?3:pt==PAWN?1:0);
+                undo_move(snapshot);
+                if (val > best_value) { best_value = val; best_idx = i; }
+            }
+            if (best_idx >= 0) chosen = moves[best_idx]; else chosen = moves[rand()%num_moves];
+            break;
+        }
+        case PERSONALITY_CONFUSING: {
+            // confusing: mix pawn pushes and tactical-looking moves: prefer pawn pushes that create discovered attacks
+            for (int i=0;i<num_moves;i++) {
+                Move m = moves[i];
+                BitBoard pawnmask = snapshot->whiteToMove ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                if (!m.capture && (m.from & pawnmask)) { chosen = m; break; }
+            }
+            if (chosen.from == 0) chosen = moves[rand()%num_moves];
+            break;
+        }
+        case PERSONALITY_ANNOYING:
+        default: {
+            // original annoying behavior: prefer checks, pawn pushes, pawn captures, non-captures, random
+            bool found = false;
+            // 1) checking moves
+            for (int i = 0; i < num_moves; i++) {
+                Move m = moves[i];
+                make_move(snapshot, m);
+                bool inChk = in_check(snapshot, snapshot->whiteToMove);
+                undo_move(snapshot);
+                if (inChk) { chosen = m; found = true; break; }
+            }
+            if (!found) {
+                // 2) pawn pushes non-capture
+                for (int i = 0; i < num_moves; i++) {
+                    Move m = moves[i];
+                    if (!m.capture) {
+                        BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                        if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                    }
+                }
+            }
+            if (!found) {
+                // 3) pawn captures
+                for (int i = 0; i < num_moves; i++) {
+                    Move m = moves[i];
+                    if (m.capture) {
+                        BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
+                        if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
+                    }
+                }
+            }
+            if (!found) {
+                // 4) any non-capture
+                for (int i = 0; i < num_moves; i++) {
+                    Move m = moves[i];
+                    if (!m.capture) { chosen = m; found = true; break; }
+                }
+            }
+            if (!found) chosen = moves[rand() % num_moves];
+            break;
+        }
+    }
+    if (moves) free(moves);
+    return chosen;
+}
 
 // Initialize the internal API. Safe to call multiple times.
 void chess_init(void) {
@@ -781,6 +971,10 @@ static int uci_process(void *arg) {
             if (!strcmp(token, "uci")) {
                 printf("id name %s\n", CHESS_BOT_NAME);
                 printf("id author %s\n", BOT_AUTHOR_NAME);
+                // expose personality option
+                printf("option name Personality type combo default Annoying var Annoying var Cautious var Random var Smart var Confusing\n");
+                // expose auto-personality toggle
+                printf("option name AutoPersonality type check default true\n");
                 printf("uciok\n");
                 fflush(stdout);
             } else if (!strcmp(token, "isready")) {
@@ -833,6 +1027,41 @@ static int uci_process(void *arg) {
                 }
                 //pthread_mutex_unlock(&API->mutex);
                 mtx_unlock(&API->mutex);
+                // after a position update, optionally update personality
+                update_personality_based_on_material(API->shared_board);
+            } else if (!strcmp(token, "setoption")) {
+                // parse: setoption name <name> value <value>
+                char *name = strtok(NULL, " ");
+                char *val = NULL;
+                if (name && strcmp(name, "name") == 0) {
+                    // consume the option name
+                    char *optname = strtok(NULL, " ");
+                        if (optname && strcmp(optname, "Personality") == 0) {
+                        // consume value token
+                        char *maybe_value = strtok(NULL, " ");
+                        if (maybe_value && strcmp(maybe_value, "value") == 0) {
+                            val = strtok(NULL, " ");
+                        }
+                        if (val) {
+                            if (!strcmp(val, "Annoying")) engine_personality = PERSONALITY_ANNOYING;
+                            else if (!strcmp(val, "Cautious")) engine_personality = PERSONALITY_CAUTIOUS;
+                            else if (!strcmp(val, "Random")) engine_personality = PERSONALITY_RANDOM;
+                            else if (!strcmp(val, "Smart")) engine_personality = PERSONALITY_SMART;
+                            else if (!strcmp(val, "Confusing")) engine_personality = PERSONALITY_CONFUSING;
+                        }
+                        }
+                        else if (optname && strcmp(optname, "AutoPersonality") == 0) {
+                            // consume value token
+                            char *maybe_value = strtok(NULL, " ");
+                            if (maybe_value && strcmp(maybe_value, "value") == 0) {
+                                val = strtok(NULL, " ");
+                            }
+                            if (val) {
+                                if (!strcmp(val, "true") || !strcmp(val, "1")) auto_personality = true;
+                                else auto_personality = false;
+                            }
+                        }
+                }
             } else if (!strcmp(token, "go")) {
                 // collect timing info
                 mtx_lock(&API->mutex);
@@ -856,77 +1085,12 @@ static int uci_process(void *arg) {
                 if (API->shared_board != NULL) snapshot = clone_board(API->shared_board);
                 mtx_unlock(&API->mutex);
 
-                // very simple synchronous 'think': pick a random legal move and announce it
+                // synchronous 'think': pick move according to current personality
                 if (snapshot != NULL) {
-                    int num_moves = 0;
-                    Move *moves = get_legal_moves(snapshot, &num_moves);
-                    Move chosen;
-                    memset(&chosen, 0, sizeof(chosen));
-                    if (num_moves > 0 && moves != NULL) {
-                        // choose an 'annoying' move: prefer checks, otherwise pawn pushes (non-capture), then pawn captures, then any non-capture, then fallback
-                        bool found = false;
-                        // 1) checking moves
-                        for (int i = 0; i < num_moves; i++) {
-                            Move m = moves[i];
-                            make_move(snapshot, m);
-                            bool inChk = in_check(snapshot, snapshot->whiteToMove);
-                            undo_move(snapshot);
-                            if (inChk) {
-                                chosen = m; found = true; break;
-                            }
-                        }
-                        if (!found) {
-                            // If any of our more valuable pieces (non-pawns) are currently
-                            // attacked by the opponent, avoid pushing pawns — prefer
-                            // moves that address the threat. Compute opponent attack map.
-                            BitBoard opp_attacks = 0;
-                            BitBoard *opp_moves = get_pseudo_legal_moves(snapshot, !snapshot->whiteToMove, true, 0, true);
-                            if (opp_moves) {
-                                for (int d = 0; d < 16; d++) opp_attacks |= opp_moves[d];
-                                free(opp_moves);
-                            }
-                            BitBoard our_non_pawns = snapshot->whiteToMove
-                                ? (snapshot->bb_white_rook | snapshot->bb_white_knight | snapshot->bb_white_bishop | snapshot->bb_white_queen | snapshot->bb_white_king)
-                                : (snapshot->bb_black_rook | snapshot->bb_black_knight | snapshot->bb_black_bishop | snapshot->bb_black_queen | snapshot->bb_black_king);
-                            bool important_in_danger = (opp_attacks & our_non_pawns) != 0;
-
-                            // 2) pawn pushes non-capture (skip if important piece in danger)
-                            if (!important_in_danger) {
-                                for (int i = 0; i < num_moves; i++) {
-                                    Move m = moves[i];
-                                    if (!m.capture) {
-                                        // check if move is pawn move
-                                        BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
-                                        if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
-                                    }
-                                }
-                            }
-                        }
-                        if (!found) {
-                            // 3) pawn captures
-                            for (int i = 0; i < num_moves; i++) {
-                                Move m = moves[i];
-                                if (m.capture) {
-                                    BitBoard pawnmask = (snapshot->whiteToMove) ? snapshot->bb_white_pawn : snapshot->bb_black_pawn;
-                                    if ((m.from & pawnmask) > 0) { chosen = m; found = true; break; }
-                                }
-                            }
-                        }
-                        if (!found) {
-                            // 4) any non-capture
-                            for (int i = 0; i < num_moves; i++) {
-                                Move m = moves[i];
-                                if (!m.capture) { chosen = m; found = true; break; }
-                            }
-                        }
-                        if (!found) {
-                            // fallback random
-                            chosen = moves[rand() % num_moves];
-                        }
-                    }
-                    if (moves) free(moves);
+                    // if auto_personality is enabled, update based on the snapshot
+                    update_personality_based_on_material(snapshot);
+                    Move chosen = choose_move(snapshot);
                     free_board(snapshot);
-
                     // report progress and bestmove
                     interface_push(chosen);
                     uci_finished_searching();
